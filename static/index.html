@@ -1,0 +1,72 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>AI Knowledge Assistant</title>
+<style>
+  body { font-family: system-ui, sans-serif; max-width: 720px; margin: 40px auto; padding: 0 16px; }
+  h1 { font-size: 1.4rem; }
+  section { margin-bottom: 24px; }
+  input[type=file], input[type=text] { padding: 8px; width: 100%; box-sizing: border-box; }
+  button { padding: 8px 16px; margin-top: 8px; cursor: pointer; }
+  #answer { white-space: pre-wrap; border: 1px solid #ccc; padding: 12px; border-radius: 6px; margin-top: 12px; }
+  .sources { font-size: 0.85rem; color: #555; margin-top: 8px; }
+  .status { font-size: 0.85rem; color: #555; }
+</style>
+</head>
+<body>
+  <h1>AI Knowledge Assistant</h1>
+
+  <section>
+    <h2>1. Upload a PDF</h2>
+    <input type="file" id="pdfFile" accept="application/pdf">
+    <button onclick="upload()">Upload &amp; Index</button>
+    <div class="status" id="uploadStatus"></div>
+  </section>
+
+  <section>
+    <h2>2. Ask a question</h2>
+    <input type="text" id="question" placeholder="Ask something about your uploaded documents...">
+    <button onclick="ask()">Ask</button>
+    <div id="answer"></div>
+  </section>
+
+<script>
+async function upload() {
+  const fileInput = document.getElementById('pdfFile');
+  const status = document.getElementById('uploadStatus');
+  if (!fileInput.files.length) {
+    status.textContent = 'Choose a PDF first.';
+    return;
+  }
+  status.textContent = 'Uploading and indexing...';
+  const formData = new FormData();
+  formData.append('file', fileInput.files[0]);
+  const res = await fetch('/upload', { method: 'POST', body: formData });
+  const data = await res.json();
+  status.textContent = res.ok
+    ? `Indexed "${data.filename}" (${data.chunks_indexed} chunks).`
+    : `Error: ${data.detail}`;
+}
+
+async function ask() {
+  const question = document.getElementById('question').value;
+  const answerBox = document.getElementById('answer');
+  if (!question.trim()) return;
+  answerBox.textContent = 'Thinking...';
+  const res = await fetch('/ask', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ question })
+  });
+  const data = await res.json();
+  const sourcesHtml = data.sources && data.sources.length
+    ? '<div class="sources">Sources: ' +
+      data.sources.map(s => `${s.source} (p.${s.page})`).join(', ') +
+      '</div>'
+    : '';
+  answerBox.innerHTML = `<div>${data.answer}</div>${sourcesHtml}`;
+}
+</script>
+</body>
+</html>
