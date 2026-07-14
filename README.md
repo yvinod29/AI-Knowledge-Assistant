@@ -2,15 +2,17 @@
 
 A local-first RAG (Retrieval-Augmented Generation) pipeline for PDF document Q&A: upload PDFs, ask questions in plain English, get answers with **page-level source citations** — every answer tells you exactly which document and page it came from. No API keys, no cloud cost — everything runs on your machine via [Ollama](https://ollama.com).
 
+**A document was updated — but the AI still returns outdated information.** That's the failure mode most RAG demos ignore: re-uploading a changed file just adds new chunks on top of the old ones, so retrieval mixes stale and current content. This project solves it at the index layer — every upload is content-hashed, and a changed document has its stale chunks deleted before the new ones are embedded, so an answer never mixes two versions of the same document. See [Design: index staleness & cache invalidation](#design-index-staleness--cache-invalidation) below for the full write-up, or [`app/ingest.py`](app/ingest.py) for the implementation.
+
 Modeled after [Mario Duerson's AI Knowledge Assistant](https://github.com/Zo-hund/ai-portfolio/tree/main/1-knowledge-assistant), simplified into a single lean Python service.
 
 ## Features
 
 - **PDF ingestion** — parses PDFs page-by-page and splits them into overlapping, page-tagged chunks.
+- **Index invalidation (no stale answers)** — re-uploading a changed PDF (same filename) automatically deletes its stale chunks and re-embeds the new content, so answers never mix old and new versions of a document. Re-uploading an unchanged PDF is a no-op (skips re-embedding). See [Design: index staleness & cache invalidation](#design-index-staleness--cache-invalidation).
 - **Local embeddings + generation** — no OpenAI/Anthropic API key required; everything runs through a local Ollama server.
 - **Page-level citations** — answers are constrained to retrieved context and cite `(document, page)` for every fact.
 - **Web UI + REST API** — a minimal single-file HTML/JS frontend, plus a documented FastAPI backend you can call directly.
-- **Index invalidation** — re-uploading a changed PDF (same filename) automatically deletes its stale chunks and re-embeds the new content, so answers never mix old and new versions of a document. Re-uploading an unchanged PDF is a no-op (skips re-embedding).
 - **Programmatic usage** — every capability is also callable as a plain Python function (see [`examples/quickstart.py`](examples/quickstart.py)), no HTTP server required.
 - **Bonus: Matryoshka embedding benchmark** — a standalone experiment (`experiments/matryoshka_benchmark.py`) measuring how much embedding storage you can save by truncating dimensions (768→512→256→128) before it hurts retrieval quality.
 
@@ -68,6 +70,18 @@ curl -X POST http://localhost:8000/ask \
 **Programmatically, no server needed:**
 ```bash
 python examples/quickstart.py your_document.pdf "What does this document say about X?"
+```
+
+**Updating a document (staleness check):**
+```bash
+# Upload v1, ask a question -> answer reflects v1
+curl -X POST http://localhost:8000/upload -F "file=@policy.pdf"
+curl -X POST http://localhost:8000/ask -H "Content-Type: application/json" -d '{"question": "What is the policy?"}'
+
+# Edit policy.pdf, re-upload with the SAME filename -> status: "updated", stale chunks removed
+curl -X POST http://localhost:8000/upload -F "file=@policy.pdf"
+curl -X POST http://localhost:8000/ask -H "Content-Type: application/json" -d '{"question": "What is the policy?"}'
+# -> answer now reflects only the new version, not a mix of old + new
 ```
 
 ## API reference
@@ -216,6 +230,7 @@ Set via environment variables or a `.env` file (see `.env.example`):
 - **`model not found` error from Ollama** — pull the missing model: `ollama pull <model-name>` (check `EMBED_MODEL`/`GEN_MODEL` in your `.env`).
 - **`{"answer": "No documents have been indexed yet.", ...}`** — no PDFs uploaded yet, or `CHROMA_DIR` points at an empty/different directory than where you ingested.
 - **Port already in use** — another `uvicorn` process is bound to 8000; stop it or run with `--port <other-port>`.
+- **Answer still reflects an old/outdated version of a document** — confirm the re-upload actually used the *same filename* as the original (invalidation is keyed on `source` name + content hash); a different filename is treated as a separate document rather than an update. Check `GET /sources` for the current `content_hash`/`indexed_at` of each document, or force a clean re-index with `DELETE /sources/{name}` followed by re-upload.
 
 ## Known limitations / next steps
 
