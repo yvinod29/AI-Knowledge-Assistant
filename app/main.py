@@ -8,7 +8,7 @@ from pydantic import BaseModel
 from app.config import UPLOAD_DIR
 from app.ingest import ingest_pdf
 from app.qa import answer_question
-from app.store import list_sources
+from app.store import delete_source, list_sources
 
 app = FastAPI(title="AI Knowledge Assistant")
 
@@ -33,8 +33,8 @@ async def upload(file: UploadFile = File(...)):
     with open(dest_path, "wb") as f:
         f.write(await file.read())
 
-    chunk_count = ingest_pdf(dest_path, file.filename)
-    return {"filename": file.filename, "chunks_indexed": chunk_count}
+    result = ingest_pdf(dest_path, file.filename)
+    return {"filename": file.filename, **result}
 
 
 @app.post("/ask")
@@ -45,6 +45,12 @@ def ask(request: AskRequest):
 @app.get("/sources")
 def sources():
     return {"sources": list_sources()}
+
+
+@app.delete("/sources/{source_name}")
+def delete(source_name: str):
+    delete_source(source_name)
+    return {"deleted": source_name}
 
 
 app.mount("/static", StaticFiles(directory="static"), name="static")

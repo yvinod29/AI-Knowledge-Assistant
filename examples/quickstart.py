@@ -28,8 +28,8 @@ def main() -> None:
     source_name = os.path.basename(pdf_path)
 
     print(f"Ingesting {source_name}...")
-    chunk_count = ingest_pdf(pdf_path, source_name)
-    print(f"Indexed {chunk_count} chunks.\n")
+    result = ingest_pdf(pdf_path, source_name)
+    print(f"{result['status']}: {result['chunks_indexed']} chunks indexed.\n")
 
     print(f"Question: {question}")
     result = answer_question(question)

@@ -10,6 +10,7 @@ Modeled after [Mario Duerson's AI Knowledge Assistant](https://github.com/Zo-hun
 - **Local embeddings + generation** — no OpenAI/Anthropic API key required; everything runs through a local Ollama server.
 - **Page-level citations** — answers are constrained to retrieved context and cite `(document, page)` for every fact.
 - **Web UI + REST API** — a minimal single-file HTML/JS frontend, plus a documented FastAPI backend you can call directly.
+- **Index invalidation** — re-uploading a changed PDF (same filename) automatically deletes its stale chunks and re-embeds the new content, so answers never mix old and new versions of a document. Re-uploading an unchanged PDF is a no-op (skips re-embedding).
 - **Programmatic usage** — every capability is also callable as a plain Python function (see [`examples/quickstart.py`](examples/quickstart.py)), no HTTP server required.
 - **Bonus: Matryoshka embedding benchmark** — a standalone experiment (`experiments/matryoshka_benchmark.py`) measuring how much embedding storage you can save by truncating dimensions (768→512→256→128) before it hurts retrieval quality.
 
@@ -74,18 +75,21 @@ python examples/quickstart.py your_document.pdf "What does this document say abo
 | Method | Path | Body | Returns |
 |---|---|---|---|
 | `GET` | `/` | — | The web UI |
-| `POST` | `/upload` | multipart form, field `file` (PDF) | `{"filename": str, "chunks_indexed": int}` |
+| `POST` | `/upload` | multipart form, field `file` (PDF) | `{"filename": str, "status": "created"\|"updated"\|"unchanged"\|"empty", "chunks_indexed": int}` |
 | `POST` | `/ask` | `{"question": str}` | `{"answer": str, "sources": [{"source": str, "page": int}, ...]}` |
-| `GET` | `/sources` | — | `{"sources": [str, ...]}` — list of indexed documents |
+| `GET` | `/sources` | — | `{"sources": [{"source": str, "content_hash": str, "indexed_at": str}, ...]}` |
+| `DELETE` | `/sources/{source_name}` | — | `{"deleted": str}` — removes all chunks for that document |
 
 ## Data formats
 
-Every chunk stored in ChromaDB carries page-level metadata so answers can cite their source:
+Every chunk stored in ChromaDB carries page-level and versioning metadata so answers can cite their source and stale chunks can be found and removed:
 ```json
 {
   "text": "chunk text extracted from the PDF page",
   "source": "your_document.pdf",
-  "page": 3
+  "page": 3,
+  "content_hash": "sha256 of the uploaded file's bytes",
+  "indexed_at": "2026-07-14T14:05:31Z"
 }
 ```
 
@@ -116,7 +120,7 @@ print(result["sources"])  # [{"source": "your_document.pdf", "page": 3}, ...]
 │  ├─ store.py      # ChromaDB add/query wrapper (lazy-initialized)
 │  ├─ llm.py        # Ollama /api/generate wrapper, citation-constrained prompt
 │  ├─ qa.py         # shared retrieve-then-generate logic (used by API + examples)
-│  └─ main.py       # FastAPI app: /, /upload, /ask, /sources
+│  └─ main.py       # FastAPI app: /, /upload, /ask, /sources, DELETE /sources/{name}
 ├─ static/
 │  └─ index.html    # single-file vanilla JS UI
 ├─ examples/
@@ -160,6 +164,24 @@ Ollama generation (qwen2.5:3b), context-constrained prompt
 Answer + page-level citations
 ```
 
+## Design: index staleness & cache invalidation
+
+**The problem:** a document gets updated, but the AI keeps returning outdated information. The naive approach — re-embedding a re-uploaded file and just adding the new chunks — doesn't fix this: the *old* chunks are still sitting in the vector store, so retrieval mixes stale and current chunks (or an old chunk can outrank the new one), and there's no way to tell an answer is grounded in a version of the document that no longer exists.
+
+**The design implemented here:**
+
+1. **Content-hash versioning, not filename-based versioning.** Every upload is hashed (`sha256` of the raw file bytes) and every stored chunk carries that hash + an `indexed_at` timestamp as metadata (`app/ingest.py`, `app/store.py`).
+2. **Upload is idempotent.** Before touching the vector store, `ingest_pdf()` checks the existing hash for that `source` name (`get_source_content_hash`). Three outcomes:
+   - **No existing hash** → first-time upload → embed and store (`status: "created"`).
+   - **Hash unchanged** → identical re-upload → skip re-embedding entirely (`status: "unchanged"`, zero embedding calls wasted).
+   - **Hash changed** → the document was actually edited → **delete all existing chunks for that source** (`delete_source`, a metadata-filtered `collection.delete(where={"source": ...})`) **before** embedding and storing the new chunks (`status: "updated"`).
+3. **No response caching layer sits in front of this** — every `/ask` call re-embeds the question and re-queries the (now-current) vector store live, so there's no separate cache to go stale or need invalidating on top of the index itself. The invalidation problem is solved once, at the index layer, rather than needing a second cache-expiry policy layered on top.
+4. **Explicit invalidation** is also exposed directly: `DELETE /sources/{name}` removes a document's chunks on demand (e.g. if a document should be retracted rather than replaced).
+
+**Verified behavior:** uploading a PDF, asking a question, then uploading a *changed* version of the same PDF and asking the same question again returns the answer reflecting the **new** content only — the old fact is gone, not just outranked. Re-uploading an unchanged file triggers zero embedding calls.
+
+**Trade-off:** this detects "did the file change" at the whole-document level (any byte difference triggers a full re-embed of every page), not a diff of which specific pages changed. For very large documents where only one page changes, a per-page hash (already tracked implicitly via the page-level chunk structure) would let you invalidate and re-embed only the changed pages — noted as a possible future refinement, not implemented since this project's PDFs are small enough that whole-document re-embedding is cheap.
+
 ## Bonus experiment: Matryoshka embedding dimension truncation
 
 `experiments/matryoshka_benchmark.py` tests whether embedding storage can be shrunk without hurting retrieval quality — the same experiment as the "Pocket Ranger" project ([Samhitha Muvva, on EmbeddingGemma](https://medium.com/@samhitha.muvva/embedding-gemma-promised-something-wild-turns-out-it-delivered-80180661e2f3)).
@@ -201,4 +223,4 @@ Set via environment variables or a `.env` file (see `.env.example`):
 - No guardrail/eval layer — answers aren't automatically scored for groundedness (see DoorDash's LLM-judge pattern for a reference approach).
 - Single-shot retrieval only — no multi-hop/agentic decomposition for questions that need combining facts across multiple documents.
 - No multi-tenant access control — all uploaded documents are queryable by anyone hitting the API.
-- Re-uploading a PDF re-embeds it from scratch; no incremental re-indexing.
+- Invalidation is whole-document granularity (any change re-embeds every page of that file), not per-page — see the trade-off note in "Design: index staleness & cache invalidation" above.

@@ -44,9 +44,17 @@ async function upload() {
   formData.append('file', fileInput.files[0]);
   const res = await fetch('/upload', { method: 'POST', body: formData });
   const data = await res.json();
-  status.textContent = res.ok
-    ? `Indexed "${data.filename}" (${data.chunks_indexed} chunks).`
-    : `Error: ${data.detail}`;
+  if (!res.ok) {
+    status.textContent = `Error: ${data.detail}`;
+    return;
+  }
+  const statusMessages = {
+    created: `Indexed "${data.filename}" (${data.chunks_indexed} chunks).`,
+    updated: `Re-indexed "${data.filename}" — document changed, old chunks replaced (${data.chunks_indexed} chunks).`,
+    unchanged: `"${data.filename}" is already up to date, skipped re-indexing.`,
+    empty: `"${data.filename}" has no extractable text.`,
+  };
+  status.textContent = statusMessages[data.status] || `Indexed "${data.filename}".`;
 }
 
 async function ask() {
